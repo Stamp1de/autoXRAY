@@ -1,9 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# autoVPN-simple.sh - Простая установка VLESS Reality БЕЗ домена
-# 
-# Маскировка под популярные сайты (Microsoft, Yahoo, и т.д.)
-# Не требует: домен, SSL сертификат, Nginx
+# autoVPN-simple.sh - VLESS Reality БЕЗ домена (исправленная версия)
 # =============================================================================
 
 set -e
@@ -18,9 +15,6 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# =============================================================================
-# Проверка root
-# =============================================================================
 if [ "$EUID" -ne 0 ]; then
     log_error "Запустите от root: sudo bash autoVPN-simple.sh"
     exit 1
@@ -29,431 +23,261 @@ fi
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
 echo "║         autoVPN-simple - VLESS Reality без домена               ║"
-echo "║                    Декабрь 2025                                  ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"
 echo ""
 
-# =============================================================================
-# Получение IP сервера
-# =============================================================================
+# Получение IP
 log_info "Определение IP сервера..."
-
 SERVER_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com || hostname -I | awk '{print $1}')
-
 if [ -z "$SERVER_IP" ]; then
-    log_error "Не удалось определить IP сервера"
+    log_error "Не удалось определить IP"
+    exit 1
+fi
+log_success "IP сервера: $SERVER_IP"
+
+# Установка
+log_info "Установка зависимостей..."
+apt update -qq
+apt install -y curl wget openssl > /dev/null 2>&1
+log_success "Готово"
+
+log_info "Установка Xray..."
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
+log_success "Xray установлен"
+
+# Генерация ключей - ИСПРАВЛЕННЫЙ ПАРСИНГ
+log_info "Генерация ключей..."
+
+UUID=$(xray uuid)
+
+# Правильный парсинг x25519 ключей
+KEYS_OUTPUT=$(xray x25519)
+PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "Private" | awk '{print $NF}')
+PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "Public" | awk '{print $NF}')
+
+# Проверка что ключи получены
+if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    log_error "Ошибка генерации ключей"
+    echo "Output: $KEYS_OUTPUT"
     exit 1
 fi
 
-log_success "IP сервера: $SERVER_IP"
-
-# =============================================================================
-# Установка зависимостей
-# =============================================================================
-log_info "Обновление системы и установка зависимостей..."
-
-apt update -qq
-apt install -y curl wget jq > /dev/null 2>&1
-
-log_success "Зависимости установлены"
-
-# =============================================================================
-# Установка Xray
-# =============================================================================
-log_info "Установка Xray..."
-
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
-
-log_success "Xray установлен"
-
-# =============================================================================
-# Генерация ключей
-# =============================================================================
-log_info "Генерация криптографических ключей..."
-
-UUID=$(xray uuid)
-KEYS=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEYS" | awk -F': ' '/Private/ {print $2}')
-PUBLIC_KEY=$(echo "$KEYS" | awk -F': ' '/Public/ {print $2}')
 SHORT_ID=$(openssl rand -hex 8)
-
-# Shadowsocks пароль
 SS_PASSWORD=$(openssl rand -base64 32)
 
-log_success "Ключи сгенерированы"
+log_success "UUID: $UUID"
+log_success "Public Key: $PUBLIC_KEY"
+log_success "Short ID: $SHORT_ID"
 
-# =============================================================================
-# Выбор SNI для маскировки
-# =============================================================================
-# Популярные сайты которые хорошо работают для Reality
-# Важно: сайт должен поддерживать TLS 1.3 и H2
-SNI_LIST=(
-    "www.microsoft.com"
-    "www.yahoo.com"
-    "www.apple.com"
-    "www.samsung.com"
-    "www.amd.com"
-    "www.nvidia.com"
-    "cdn.cloudflare.com"
-    "www.asus.com"
-    "www.logitech.com"
-)
-
-# Выбираем случайный SNI
+# SNI для маскировки
+SNI_LIST=("www.microsoft.com" "www.yahoo.com" "www.samsung.com" "www.amd.com" "www.nvidia.com" "www.logitech.com")
 SNI=${SNI_LIST[$RANDOM % ${#SNI_LIST[@]}]}
+log_info "SNI: $SNI"
 
-log_info "Выбран SNI для маскировки: $SNI"
-
-# =============================================================================
 # Порты
-# =============================================================================
-# Основной порт - 443 (стандартный HTTPS)
-# Альтернативные порты на случай блокировки 443
 PORT_MAIN=443
 PORT_ALT1=8443
 PORT_ALT2=2053
 PORT_SS=2087
 
-# =============================================================================
-# Создание конфигурации Xray
-# =============================================================================
-log_info "Создание конфигурации Xray..."
+# Конфиг Xray
+log_info "Создание конфигурации..."
 
 mkdir -p /var/log/xray
-mkdir -p /usr/local/etc/xray
 
-cat > /usr/local/etc/xray/config.json <<EOF
+cat > /usr/local/etc/xray/config.json << XRAYEOF
 {
   "log": {
-    "loglevel": "warning",
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log"
-  },
-  "dns": {
-    "servers": [
-      "https+local://8.8.8.8/dns-query",
-      "https+local://1.1.1.1/dns-query"
-    ],
-    "queryStrategy": "UseIPv4"
+    "loglevel": "warning"
   },
   "inbounds": [
     {
-      "tag": "vless-reality-main",
-      "port": $PORT_MAIN,
-      "listen": "0.0.0.0",
+      "tag": "vless-reality-${PORT_MAIN}",
+      "port": ${PORT_MAIN},
       "protocol": "vless",
       "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
+        "clients": [{"id": "${UUID}", "flow": "xtls-rprx-vision"}],
         "decryption": "none"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "show": false,
-          "dest": "$SNI:443",
-          "xver": 0,
-          "serverNames": ["$SNI"],
-          "privateKey": "$PRIVATE_KEY",
-          "shortIds": ["$SHORT_ID"]
+          "dest": "${SNI}:443",
+          "serverNames": ["${SNI}"],
+          "privateKey": "${PRIVATE_KEY}",
+          "shortIds": ["${SHORT_ID}"]
         }
-      }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
     },
     {
-      "tag": "vless-reality-alt1",
-      "port": $PORT_ALT1,
-      "listen": "0.0.0.0",
+      "tag": "vless-reality-${PORT_ALT1}",
+      "port": ${PORT_ALT1},
       "protocol": "vless",
       "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
+        "clients": [{"id": "${UUID}", "flow": "xtls-rprx-vision"}],
         "decryption": "none"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "show": false,
-          "dest": "$SNI:443",
-          "xver": 0,
-          "serverNames": ["$SNI"],
-          "privateKey": "$PRIVATE_KEY",
-          "shortIds": ["$SHORT_ID"]
+          "dest": "${SNI}:443",
+          "serverNames": ["${SNI}"],
+          "privateKey": "${PRIVATE_KEY}",
+          "shortIds": ["${SHORT_ID}"]
         }
-      }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
     },
     {
-      "tag": "vless-reality-alt2",
-      "port": $PORT_ALT2,
-      "listen": "0.0.0.0",
+      "tag": "vless-reality-${PORT_ALT2}",
+      "port": ${PORT_ALT2},
       "protocol": "vless",
       "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
+        "clients": [{"id": "${UUID}", "flow": "xtls-rprx-vision"}],
         "decryption": "none"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "show": false,
-          "dest": "$SNI:443",
-          "xver": 0,
-          "serverNames": ["$SNI"],
-          "privateKey": "$PRIVATE_KEY",
-          "shortIds": ["$SHORT_ID"]
+          "dest": "${SNI}:443",
+          "serverNames": ["${SNI}"],
+          "privateKey": "${PRIVATE_KEY}",
+          "shortIds": ["${SHORT_ID}"]
         }
-      }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
     },
     {
       "tag": "shadowsocks",
-      "port": $PORT_SS,
-      "listen": "0.0.0.0",
+      "port": ${PORT_SS},
       "protocol": "shadowsocks",
       "settings": {
         "method": "2022-blake3-chacha20-poly1305",
-        "password": "$SS_PASSWORD",
+        "password": "${SS_PASSWORD}",
         "network": "tcp,udp"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
       }
     }
   ],
   "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4"
-      }
-    },
-    {
-      "tag": "block",
-      "protocol": "blackhole"
-    }
+    {"tag": "direct", "protocol": "freedom"},
+    {"tag": "block", "protocol": "blackhole"}
   ],
   "routing": {
-    "domainStrategy": "IPIfNonMatch",
     "rules": [
-      {
-        "type": "field",
-        "ip": ["geoip:private"],
-        "outboundTag": "block"
-      },
-      {
-        "type": "field",
-        "protocol": ["bittorrent"],
-        "outboundTag": "block"
-      },
-      {
-        "type": "field",
-        "domain": ["geosite:category-ads"],
-        "outboundTag": "block"
-      }
+      {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
+      {"type": "field", "protocol": ["bittorrent"], "outboundTag": "block"}
     ]
   }
 }
-EOF
+XRAYEOF
 
-log_success "Конфигурация создана"
+log_success "Конфиг создан"
 
-# =============================================================================
-# Запуск Xray
-# =============================================================================
+# Запуск
 log_info "Запуск Xray..."
-
 systemctl enable xray > /dev/null 2>&1
 systemctl restart xray
 
-# Проверка статуса
 sleep 2
 if systemctl is-active --quiet xray; then
-    log_success "Xray запущен и работает"
+    log_success "Xray работает"
 else
-    log_error "Ошибка запуска Xray"
-    systemctl status xray
+    log_error "Ошибка запуска!"
+    journalctl -u xray -n 20
     exit 1
 fi
 
-# =============================================================================
-# Настройка firewall (если установлен)
-# =============================================================================
+# Firewall
 if command -v ufw &> /dev/null; then
-    log_info "Настройка UFW..."
-    ufw allow $PORT_MAIN/tcp > /dev/null 2>&1
-    ufw allow $PORT_ALT1/tcp > /dev/null 2>&1
-    ufw allow $PORT_ALT2/tcp > /dev/null 2>&1
-    ufw allow $PORT_SS/tcp > /dev/null 2>&1
-    ufw allow $PORT_SS/udp > /dev/null 2>&1
-    log_success "Firewall настроен"
+    ufw allow ${PORT_MAIN}/tcp > /dev/null 2>&1
+    ufw allow ${PORT_ALT1}/tcp > /dev/null 2>&1
+    ufw allow ${PORT_ALT2}/tcp > /dev/null 2>&1
+    ufw allow ${PORT_SS}/tcp > /dev/null 2>&1
+    ufw allow ${PORT_SS}/udp > /dev/null 2>&1
 fi
 
-# =============================================================================
-# Включение BBR
-# =============================================================================
-log_info "Проверка TCP BBR..."
-
-if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
+# BBR
+if ! grep -q "tcp_congestion_control=bbr" /etc/sysctl.conf 2>/dev/null; then
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p > /dev/null 2>&1
-    log_success "BBR включен"
-else
-    log_success "BBR уже включен"
 fi
 
-# =============================================================================
-# Генерация ссылок
-# =============================================================================
+# Ссылки
+LINK_MAIN="vless://${UUID}@${SERVER_IP}:${PORT_MAIN}?security=reality&encryption=none&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#Reality-${PORT_MAIN}"
 
-# VLESS Reality ссылки
-LINK_MAIN="vless://${UUID}@${SERVER_IP}:${PORT_MAIN}?security=reality&encryption=none&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#VPN-Reality-${PORT_MAIN}"
+LINK_ALT1="vless://${UUID}@${SERVER_IP}:${PORT_ALT1}?security=reality&encryption=none&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#Reality-${PORT_ALT1}"
 
-LINK_ALT1="vless://${UUID}@${SERVER_IP}:${PORT_ALT1}?security=reality&encryption=none&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#VPN-Reality-${PORT_ALT1}"
+LINK_ALT2="vless://${UUID}@${SERVER_IP}:${PORT_ALT2}?security=reality&encryption=none&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#Reality-${PORT_ALT2}"
 
-LINK_ALT2="vless://${UUID}@${SERVER_IP}:${PORT_ALT2}?security=reality&encryption=none&type=tcp&flow=xtls-rprx-vision&sni=${SNI}&fp=firefox&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#VPN-Reality-${PORT_ALT2}"
+SS_ENC=$(echo -n "2022-blake3-chacha20-poly1305:${SS_PASSWORD}" | base64 -w 0)
+LINK_SS="ss://${SS_ENC}@${SERVER_IP}:${PORT_SS}#SS2022"
 
-# Shadowsocks ссылка
-SS_ENCODED=$(echo -n "2022-blake3-chacha20-poly1305:${SS_PASSWORD}" | base64 -w 0)
-LINK_SS="ss://${SS_ENCODED}@${SERVER_IP}:${PORT_SS}#Shadowsocks-2022"
+# Сохранение
+cat > /root/vpn-configs.txt << CONFIGEOF
+══════════════════════════════════════════════════════════════
+VPN CONFIGS - Server: ${SERVER_IP} | SNI: ${SNI}
+══════════════════════════════════════════════════════════════
 
-# =============================================================================
-# Сохранение конфигов в файл
-# =============================================================================
-CONFIG_FILE="/root/vpn-configs.txt"
+VLESS Reality (порт ${PORT_MAIN}):
+${LINK_MAIN}
 
-cat > "$CONFIG_FILE" <<EOF
-═══════════════════════════════════════════════════════════════════════════════
-                         VPN КОНФИГУРАЦИИ
-                     Сервер: $SERVER_IP
-                     SNI маскировка: $SNI
-═══════════════════════════════════════════════════════════════════════════════
+VLESS Reality (порт ${PORT_ALT1}):
+${LINK_ALT1}
 
-▶ VLESS Reality — порт $PORT_MAIN (основной):
-$LINK_MAIN
+VLESS Reality (порт ${PORT_ALT2}):
+${LINK_ALT2}
 
-▶ VLESS Reality — порт $PORT_ALT1 (резервный):
-$LINK_ALT1
+Shadowsocks 2022 (порт ${PORT_SS}):
+${LINK_SS}
 
-▶ VLESS Reality — порт $PORT_ALT2 (резервный):
-$LINK_ALT2
-
-▶ Shadowsocks 2022 — порт $PORT_SS (если VLESS блокируют):
-$LINK_SS
-
-═══════════════════════════════════════════════════════════════════════════════
-                         ПАРАМЕТРЫ ДЛЯ РУЧНОЙ НАСТРОЙКИ
-═══════════════════════════════════════════════════════════════════════════════
-
-Адрес сервера: $SERVER_IP
-UUID: $UUID
-Public Key: $PUBLIC_KEY
-Short ID: $SHORT_ID
-SNI: $SNI
+══════════════════════════════════════════════════════════════
+РУЧНАЯ НАСТРОЙКА:
+══════════════════════════════════════════════════════════════
+Address: ${SERVER_IP}
+UUID: ${UUID}
+Public Key: ${PUBLIC_KEY}
+Short ID: ${SHORT_ID}
+SNI: ${SNI}
 Flow: xtls-rprx-vision
 Fingerprint: chrome
+══════════════════════════════════════════════════════════════
+CONFIGEOF
 
-Shadowsocks:
-  Метод: 2022-blake3-chacha20-poly1305
-  Пароль: $SS_PASSWORD
-  Порт: $PORT_SS
-
-═══════════════════════════════════════════════════════════════════════════════
-                         ПРИЛОЖЕНИЯ ДЛЯ ПОДКЛЮЧЕНИЯ
-═══════════════════════════════════════════════════════════════════════════════
-
-iOS/macOS: Happ, v2rayTun, FoXray, Shadowrocket
-Android:   Happ, v2rayTun, v2rayNG, NekoBox
-Windows:   Happ, v2rayN, Nekoray, Invisible Man
-Linux:     v2rayN, Nekoray
-
-═══════════════════════════════════════════════════════════════════════════════
-                         ЕСЛИ НЕ РАБОТАЕТ
-═══════════════════════════════════════════════════════════════════════════════
-
-1. Попробуйте другой порт (8443 или 2053 вместо 443)
-2. Используйте Shadowsocks — он часто работает когда VLESS блокируют
-3. Смените приложение-клиент
-4. Перезапустите скрипт для генерации нового SNI
-
-Перезапуск Xray: systemctl restart xray
-Просмотр логов:  journalctl -u xray -f
-Этот файл:       cat /root/vpn-configs.txt
-
-═══════════════════════════════════════════════════════════════════════════════
-EOF
-
-# =============================================================================
-# Финальный вывод
-# =============================================================================
+# Вывод
 echo ""
-echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-echo "║                      ✅ УСТАНОВКА ЗАВЕРШЕНА!                                ║"
-echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+echo "╔════════════════════════════════════════════════════════════════════╗"
+echo "║                    ✅ УСТАНОВКА ЗАВЕРШЕНА!                        ║"
+echo "╚════════════════════════════════════════════════════════════════════╝"
 echo ""
-echo -e "${GREEN}Сервер:${NC} $SERVER_IP"
-echo -e "${GREEN}Маскировка под:${NC} $SNI"
+echo -e "${GREEN}Сервер:${NC} ${SERVER_IP}"
+echo -e "${GREEN}SNI:${NC} ${SNI}"
 echo ""
-echo "────────────────────────────────────────────────────────────────────────────────"
+echo "═══════════════════════════════════════════════════════════════════════"
+echo -e "${YELLOW}VLESS Reality — порт ${PORT_MAIN}:${NC}"
 echo ""
-echo -e "${YELLOW}▶ VLESS Reality — порт $PORT_MAIN (скопируйте в приложение):${NC}"
+echo -e "${GREEN}${LINK_MAIN}${NC}"
 echo ""
-echo -e "${GREEN}$LINK_MAIN${NC}"
+echo "═══════════════════════════════════════════════════════════════════════"
+echo -e "${YELLOW}VLESS Reality — порт ${PORT_ALT1} (если 443 блокируют):${NC}"
 echo ""
-echo "────────────────────────────────────────────────────────────────────────────────"
+echo -e "${GREEN}${LINK_ALT1}${NC}"
 echo ""
-echo -e "${YELLOW}▶ VLESS Reality — порт $PORT_ALT1 (если 443 заблокирован):${NC}"
+echo "═══════════════════════════════════════════════════════════════════════"
+echo -e "${YELLOW}VLESS Reality — порт ${PORT_ALT2}:${NC}"
 echo ""
-echo -e "${GREEN}$LINK_ALT1${NC}"
+echo -e "${GREEN}${LINK_ALT2}${NC}"
 echo ""
-echo "────────────────────────────────────────────────────────────────────────────────"
+echo "═══════════════════════════════════════════════════════════════════════"
+echo -e "${YELLOW}Shadowsocks 2022 — порт ${PORT_SS}:${NC}"
 echo ""
-echo -e "${YELLOW}▶ VLESS Reality — порт $PORT_ALT2 (резервный):${NC}"
+echo -e "${GREEN}${LINK_SS}${NC}"
 echo ""
-echo -e "${GREEN}$LINK_ALT2${NC}"
+echo "═══════════════════════════════════════════════════════════════════════"
 echo ""
-echo "────────────────────────────────────────────────────────────────────────────────"
-echo ""
-echo -e "${YELLOW}▶ Shadowsocks 2022 — порт $PORT_SS (резервный протокол):${NC}"
-echo ""
-echo -e "${GREEN}$LINK_SS${NC}"
-echo ""
-echo "────────────────────────────────────────────────────────────────────────────────"
-echo ""
-echo -e "${BLUE}📱 Как подключиться:${NC}"
-echo "   1. Установите приложение: Happ, v2rayNG, v2rayN или Nekoray"
-echo "   2. Скопируйте ссылку выше"
-echo "   3. Добавьте конфиг в приложение (обычно кнопка + или 'импорт из буфера')"
-echo "   4. Подключитесь!"
-echo ""
-echo -e "${BLUE}📄 Все конфиги сохранены в:${NC} /root/vpn-configs.txt"
-echo ""
-echo -e "${YELLOW}⚠️  Если порт 443 заблокирован — используйте порт $PORT_ALT1 или $PORT_ALT2${NC}"
+echo -e "Конфиги сохранены: ${BLUE}/root/vpn-configs.txt${NC}"
 echo ""
