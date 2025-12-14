@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# autoVPN-simple.sh - VLESS Reality БЕЗ домена (исправленная версия)
+# autoVPN-simple.sh - VLESS Reality БЕЗ домена 1
 # =============================================================================
 
 set -e
@@ -45,17 +45,19 @@ log_info "Установка Xray..."
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1
 log_success "Xray установлен"
 
-# Генерация ключей - ИСПРАВЛЕННЫЙ ПАРСИНГ
+# Генерация ключей
 log_info "Генерация ключей..."
 
 UUID=$(xray uuid)
 
-# Правильный парсинг x25519 ключей
+# Новый формат вывода xray x25519:
+# PrivateKey: xxx
+# Password: xxx (это публичный ключ для клиента!)
 KEYS_OUTPUT=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "Private" | awk '{print $NF}')
-PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "Public" | awk '{print $NF}')
+PRIVATE_KEY=$(echo "$KEYS_OUTPUT" | grep "PrivateKey" | awk '{print $2}')
+PUBLIC_KEY=$(echo "$KEYS_OUTPUT" | grep "Password" | awk '{print $2}')
 
-# Проверка что ключи получены
+# Проверка
 if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
     log_error "Ошибка генерации ключей"
     echo "Output: $KEYS_OUTPUT"
@@ -66,6 +68,7 @@ SHORT_ID=$(openssl rand -hex 8)
 SS_PASSWORD=$(openssl rand -base64 32)
 
 log_success "UUID: $UUID"
+log_success "Private Key: $PRIVATE_KEY"
 log_success "Public Key: $PUBLIC_KEY"
 log_success "Short ID: $SHORT_ID"
 
@@ -92,7 +95,7 @@ cat > /usr/local/etc/xray/config.json << XRAYEOF
   },
   "inbounds": [
     {
-      "tag": "vless-reality-${PORT_MAIN}",
+      "tag": "vless-${PORT_MAIN}",
       "port": ${PORT_MAIN},
       "protocol": "vless",
       "settings": {
@@ -112,7 +115,7 @@ cat > /usr/local/etc/xray/config.json << XRAYEOF
       "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
     },
     {
-      "tag": "vless-reality-${PORT_ALT1}",
+      "tag": "vless-${PORT_ALT1}",
       "port": ${PORT_ALT1},
       "protocol": "vless",
       "settings": {
@@ -132,7 +135,7 @@ cat > /usr/local/etc/xray/config.json << XRAYEOF
       "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
     },
     {
-      "tag": "vless-reality-${PORT_ALT2}",
+      "tag": "vless-${PORT_ALT2}",
       "port": ${PORT_ALT2},
       "protocol": "vless",
       "settings": {
@@ -240,11 +243,13 @@ ${LINK_SS}
 ══════════════════════════════════════════════════════════════
 Address: ${SERVER_IP}
 UUID: ${UUID}
-Public Key: ${PUBLIC_KEY}
-Short ID: ${SHORT_ID}
+Public Key (pbk): ${PUBLIC_KEY}
+Short ID (sid): ${SHORT_ID}
 SNI: ${SNI}
 Flow: xtls-rprx-vision
 Fingerprint: chrome
+Security: reality
+Network: tcp
 ══════════════════════════════════════════════════════════════
 CONFIGEOF
 
@@ -280,4 +285,6 @@ echo ""
 echo "═══════════════════════════════════════════════════════════════════════"
 echo ""
 echo -e "Конфиги сохранены: ${BLUE}/root/vpn-configs.txt${NC}"
+echo ""
+echo -e "${YELLOW}Приложения: v2rayNG, Happ, Nekoray, v2rayN${NC}"
 echo ""
