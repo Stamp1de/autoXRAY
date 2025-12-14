@@ -13,7 +13,7 @@ Bash-скрипт для автоматической настройки ядр�
 ## Стандартная установка
 Зайдите в консоль на сервер (Debian 12), например, с помощью PuTTY и введите команду:
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/autoXRAY.sh)"
+bash -c "$(curl -L https://raw.githubusercontent.com/Stamp1de/autoXRAY/Stamp1de-patch-1/autoXRAY.sh)"
 ```
 Подождите около 5 минут, пока устанавливаются обновления и ядро. В конце установки зелёными цветом будут подсвечены 3 готовых конфига. Вам останется только вставить их в ваше клиентское приложение.
 
